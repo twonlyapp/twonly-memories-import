@@ -72,7 +72,7 @@ mkdir "$WORK/page"
 cp -R "$PAGE_REPO/src" "$PAGE_REPO/assets" "$WORK/page/"
 sed \
   -e "s|https://api.twonly.eu|$API|g" \
-  -e "s|https://s3.twonly.eu|$S3|g" \
+  -e "s|https://fsn1.your-objectstorage.com|$S3|g" \
   "$PAGE_REPO/index.html" >"$WORK/page/index.html"
 python3 -m http.server 3141 --bind 127.0.0.1 --directory "$WORK/page" >"$WORK/serve.log" 2>&1 &
 PIDS+=($!)
