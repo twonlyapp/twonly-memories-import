@@ -1,0 +1,39 @@
+// Messages between the twonly app and the memories importer page.
+// The page encodes and decodes these by hand (src/crypto.js); the app
+// uses prost (rust/src/services/memory_importer.rs).
+syntax = "proto3";
+package importer;
+
+// The app seals this to the page's X25519 key.
+message ImporterGrant {
+  uint32 version = 1;            // 1
+  string import_id = 2;          // UUID v4
+  string addition = 3;           // "import_" + import_id
+  bytes kek = 4;                 // HKDF(main_key, "cloud_media_key_import_<id>"), 32 bytes
+  bytes id_key = 5;              // HKDF(main_key, "memory_import_ids"), 32 bytes
+  bytes importer_token = 6;      // 32 random bytes; the server stores SHA-256
+  string username = 7;
+  string display_name = 8;
+  int64 expires_at = 9;          // unix seconds
+}
+
+// k = HKDF-SHA256(ikm = X25519(e, p), salt = e_pub || p_pub,
+//                 info = "twonly importer pairing v1" || pairing_id)
+// ciphertext = XChaCha20-Poly1305(k, nonce, grant, aad = pairing_id || e_pub || p_pub)
+message ImporterEnvelope {
+  bytes e_pub = 1;
+  bytes nonce = 2;               // 24 bytes
+  bytes ciphertext = 3;
+}
+
+// Encrypted under the memory's media key (ChaCha20-Poly1305) and stored as
+// nonce12 || ciphertext || tag in CloudMediaBackupEncrypted.encrypted_metadata
+// (field 5) of the thumbnail payload.
+message ImportedMemoryMetadata {
+  string source = 1;             // adapter id, e.g. "snapchat"
+  uint32 media_type = 2;         // 1 image, 2 video
+  int64 created_at = 3;          // unix seconds, UTC
+  optional double latitude = 4;
+  optional double longitude = 5;
+  bool had_overlay = 6;
+}
