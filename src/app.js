@@ -128,15 +128,9 @@ function formatCount(n) {
   return new Intl.NumberFormat(locale()).format(n);
 }
 
-/** Bytes per second in MB/s, the unit macOS and Windows show. */
-function formatSpeed(bytesPerSecond) {
-  if (bytesPerSecond === null) return '–';
-  return `${formatBytes(bytesPerSecond)}/s`;
-}
-
-/** The same in Mbit/s, the unit internet speed tests use. */
+/** Bytes per second in Mbit/s, the unit internet speed tests use. */
 function formatMbit(bytesPerSecond) {
-  if (bytesPerSecond === null) return '';
+  if (bytesPerSecond === null) return '–';
   const mbit = (bytesPerSecond * 8) / 1_000_000;
   const digits = mbit < 10 ? 1 : 0;
   return `${new Intl.NumberFormat(locale(), { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(mbit)} Mbit/s`;
@@ -565,6 +559,7 @@ async function showPairing(messageKey = null) {
         h('div', { class: 'qr' }, canvas),
         h('div', {},
           h('ol', { class: 'steps' },
+            h('li', { text: t('scanStepVersion') }),
             h('li', { text: t('scanStep1') }),
             h('li', { text: t('scanStep2') })))),
       status));
@@ -718,11 +713,11 @@ async function startUpload({ order, from, to, usage }) {
   const failed = [];
   const bar = h('div', { class: 'progress-bar' });
   const values = {};
-  const labels = {};
-  const statEl = (key, label) => {
+  const details = {};
+  const statEl = (key, label, withDetail = false) => {
     values[key] = h('div', { class: 'value', text: '0' });
-    labels[key] = h('div', { class: 'label', text: label });
-    return h('div', { class: 'stat' }, values[key], labels[key]);
+    if (withDetail) details[key] = h('div', { class: 'detail', text: formatBytes(0) });
+    return h('div', { class: 'stat' }, values[key], details[key] || null, h('div', { class: 'label', text: label }));
   };
   const statusLine = h('p', { class: 'muted', 'aria-live': 'polite', text: t('preparing') });
   // Not aria-live: it changes every few seconds and would keep interrupting.
@@ -732,13 +727,23 @@ async function startUpload({ order, from, to, usage }) {
   /** Source bytes per item, the estimate's unit of work. */
   const workOf = (item) => item.main.size + (item.overlay ? item.overlay.size : 0);
   const workById = new Map(items.map((item) => [item.sourceItemId, workOf(item)]));
-  const estimate = new UploadEstimate({ totalBytes: items.reduce((sum, item) => sum + workOf(item), 0) });
+  const totalWork = items.reduce((sum, item) => sum + workOf(item), 0);
+  const estimate = new UploadEstimate({ totalBytes: totalWork });
   const speed = new UploadSpeed();
-  const finishWork = (sourceItemId) => {
+  /** Source bytes of the memories not finished yet. */
+  let leftBytes = totalWork;
+  /** Takes an item out of the work; returns its source bytes, or 0 if it already left. */
+  const leaveWork = (sourceItemId) => {
     const bytes = workById.get(sourceItemId);
-    if (bytes === undefined) return;
+    if (bytes === undefined) return 0;
     workById.delete(sourceItemId);
-    estimate.finish(bytes);
+    leftBytes -= bytes;
+    return bytes;
+  };
+  const finishWork = (sourceItemId) => {
+    const bytes = leaveWork(sourceItemId);
+    if (bytes) estimate.finish(bytes);
+    return bytes;
   };
   let paused = false;
   const pauseButton = h('button', {
@@ -765,7 +770,7 @@ async function startUpload({ order, from, to, usage }) {
       statusLine,
       etaLine,
       h('div', { class: 'stats' },
-        statEl('done', t('statUploaded')), statEl('already', t('statAlreadyInTwonly')), statEl('skipped', t('statSkipped')), statEl('failed', t('statFailed')), statEl('left', t('statLeft')), statEl('speed', t('statUploadSpeed'))),
+        statEl('done', t('statUploaded'), true), statEl('already', t('statAlreadyInTwonly')), statEl('skipped', t('statSkipped')), statEl('failed', t('statFailed')), statEl('left', t('statLeft'), true), statEl('speed', t('statUploadSpeed'))),
       h('div', { class: 'row' }, pauseButton),
       problemList));
 
@@ -777,10 +782,9 @@ async function startUpload({ order, from, to, usage }) {
     values.skipped.textContent = formatCount(counters.skipped + counters.conflicts);
     values.failed.textContent = formatCount(counters.failed);
     values.left.textContent = formatCount(Math.max(0, counters.total - finished));
-    const rate = speed.rate();
-    values.speed.textContent = formatSpeed(rate);
-    const mbit = formatMbit(rate);
-    labels.speed.textContent = mbit ? `${t('statUploadSpeed')} (${mbit})` : t('statUploadSpeed');
+    details.done.textContent = formatBytes(counters.uploadedBytes);
+    details.left.textContent = formatBytes(Math.max(0, leftBytes));
+    values.speed.textContent = formatMbit(speed.rate());
     const eta = formatTimeLeft(estimate.estimate());
     if (etaLine.textContent !== eta) etaLine.textContent = eta;
     // Rebuilt only when it grows: progress events render many times a second.
@@ -813,13 +817,15 @@ async function startUpload({ order, from, to, usage }) {
       if (event.type === 'progress') speed.progress(event.mediaId, event.part, event.loaded);
       // A retry uploads both parts again from the start.
       if (event.type === 'retry') speed.forget(event.mediaId);
+      let finishedBytes = 0;
       if (['done', 'already_uploaded', 'ownership_conflict', 'too_large', 'failed', 'not_uploaded'].includes(event.type)) {
-        finishWork(event.sourceItemId);
+        finishedBytes = finishWork(event.sourceItemId);
         speed.forget(event.mediaId);
       }
       switch (event.type) {
         case 'done':
           counters.done++;
+          counters.uploadedBytes += finishedBytes;
           state.progress.set(event.mediaId, 'done');
           break;
         case 'already_uploaded':
@@ -882,7 +888,7 @@ async function startUpload({ order, from, to, usage }) {
     onItem: ({ type, item, error }) => {
       if (type === 'skipped_done') {
         // Uploaded by an earlier run: no work, and no throughput either.
-        workById.delete(item.sourceItemId);
+        leaveWork(item.sourceItemId);
         estimate.skip(workOf(item));
       } else {
         finishWork(item.sourceItemId);
